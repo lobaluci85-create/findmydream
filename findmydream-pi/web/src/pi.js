@@ -6,7 +6,7 @@
 // and BACKEND set to your deployed backend URL.
 
 const BACKEND = "https://findmydream.onrender.com";   // live Render backend
-const SANDBOX = true;                          // true while testing, false for Mainnet launch
+const SANDBOX = false;                          // true while testing, false for Mainnet launch
 
 let _accessToken = null;   // current Pioneer's Pi access token
 let _user = null;          // { uid, username }
