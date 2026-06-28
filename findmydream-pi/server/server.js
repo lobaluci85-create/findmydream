@@ -7,12 +7,15 @@
 //   3. Aggregates symbol counts -> the REAL "collective unconscious" numbers.
 //   4. Handles the Pi payment Approve + Complete flow for the paid deep reading.
 //
+// Storage: a simple JSON file (no native modules, builds anywhere). For heavy
+// production scale, swap to Postgres later; the shapes below port directly.
+//
 // Secrets live only here (server side), never in the frontend:
 //   PI_API_KEY  -> from your app's dashboard in the Pi Developer Portal.
 
 import express from "express";
 import cors from "cors";
-import Database from "better-sqlite3";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 const PORT = process.env.PORT || 8080;
 const PI_API_KEY = process.env.PI_API_KEY;                 // REQUIRED for payments
@@ -22,35 +25,22 @@ const PI_API = "https://api.minepi.com/v2";
 
 if (!PI_API_KEY) console.warn("[warn] PI_API_KEY is not set — payments will fail until you add it.");
 
-// ── Database (SQLite: zero setup. For scale, swap to Postgres; schema is the same) ──
-const db = new Database("findmydream.db");
-db.exec(`
-  CREATE TABLE IF NOT EXISTS dreams (
-    id        TEXT PRIMARY KEY,
-    uid       TEXT NOT NULL,
-    ts        INTEGER NOT NULL,
-    dream     TEXT NOT NULL,
-    archetype TEXT,
-    tradition TEXT,
-    symbols   TEXT,           -- JSON array of symbol keys
-    deep      TEXT            -- unlocked deep reading, if purchased
-  );
-  CREATE INDEX IF NOT EXISTS idx_dreams_uid ON dreams(uid, ts DESC);
-
-  CREATE TABLE IF NOT EXISTS symbol_counts (
-    symbol TEXT PRIMARY KEY,
-    count  INTEGER NOT NULL DEFAULT 0
-  );
-
-  CREATE TABLE IF NOT EXISTS payments (
-    payment_id TEXT PRIMARY KEY,
-    uid        TEXT,
-    dream_id   TEXT,
-    status     TEXT,          -- approved | completed
-    txid       TEXT,
-    created    INTEGER
-  );
-`);
+// ── Storage (plain JSON file: zero native deps) ──────────────────────────
+const DATA_FILE = process.env.DATA_FILE || "./data.json";
+let store = { dreams: [], counts: {}, payments: {} };
+try {
+  if (existsSync(DATA_FILE)) store = JSON.parse(readFileSync(DATA_FILE, "utf8"));
+} catch (e) { console.warn("[warn] could not read data file, starting fresh"); }
+let saveTimer = null;
+function save() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try { writeFileSync(DATA_FILE, JSON.stringify(store)); }
+    catch (e) { console.error("save failed", e.message); }
+  }, 200);
+}
+function bumpSymbol(s) { const k = String(s).toLowerCase(); store.counts[k] = (store.counts[k] || 0) + 1; }
+function lowerSymbol(s) { const k = String(s).toLowerCase(); if (store.counts[k]) store.counts[k] = Math.max(0, store.counts[k] - 1); }
 
 // ── App ──
 const app = express();
@@ -70,7 +60,6 @@ app.use((req, res, next) => {
 setInterval(() => { const now = Date.now(); for (const [ip, s] of hits) if (now > s.reset) hits.delete(ip); }, 120000);
 
 // ── Auth: verify the Pi access token, attach req.uid / req.username ──
-// Small cache so we don't call Pi's /me on every single request.
 const tokenCache = new Map(); // accessToken -> { uid, username, exp }
 async function verifyPiToken(accessToken) {
   const cached = tokenCache.get(accessToken);
@@ -99,83 +88,75 @@ async function auth(req, res, next) {
 // ── Routes ──
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// Confirm login and return the verified Pioneer
 app.post("/auth", auth, (req, res) => {
   res.json({ uid: req.uid, username: req.username });
 });
 
 // This user's dream journal, newest first
 app.get("/dreams", auth, (req, res) => {
-  const rows = db.prepare("SELECT id, ts, dream, archetype, tradition, symbols, deep FROM dreams WHERE uid = ? ORDER BY ts DESC LIMIT 500").all(req.uid);
-  res.json(rows.map(r => ({ ...r, symbols: JSON.parse(r.symbols || "[]") })));
+  const rows = store.dreams
+    .filter(d => d.uid === req.uid)
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 500)
+    .map(d => ({ id: d.id, ts: d.ts, dream: d.dream, archetype: d.archetype, tradition: d.tradition, symbols: d.symbols || [], deep: d.deep || null }));
+  res.json(rows);
 });
 
 // Save a new dream + fold its symbols into the collective
-const insertDream = db.prepare("INSERT INTO dreams (id, uid, ts, dream, archetype, tradition, symbols) VALUES (?,?,?,?,?,?,?)");
-const bumpSymbol = db.prepare("INSERT INTO symbol_counts (symbol, count) VALUES (?, 1) ON CONFLICT(symbol) DO UPDATE SET count = count + 1");
 app.post("/dreams", auth, (req, res) => {
   const { dream, archetype, tradition, symbols, ts } = req.body || {};
   if (!dream || typeof dream !== "string") return res.status(400).json({ error: "dream required" });
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const syms = Array.isArray(symbols) ? symbols.slice(0, 8) : [];
-  const tx = db.transaction(() => {
-    insertDream.run(id, req.uid, ts || Date.now(), dream.slice(0, 4000), archetype || "", tradition || "all", JSON.stringify(syms));
-    syms.forEach(s => bumpSymbol.run(String(s).toLowerCase()));
-  });
-  tx();
+  store.dreams.push({ id, uid: req.uid, ts: ts || Date.now(), dream: dream.slice(0, 4000), archetype: archetype || "", tradition: tradition || "all", symbols: syms, deep: null });
+  syms.forEach(bumpSymbol);
+  save();
   res.json({ id });
 });
 
 // The real collective unconscious — top symbols across all verified users
 app.get("/collective", (_req, res) => {
-  const rows = db.prepare("SELECT symbol AS s, count AS n FROM symbol_counts ORDER BY count DESC LIMIT 20").all();
-  const dreamers = db.prepare("SELECT COUNT(DISTINCT uid) AS n FROM dreams").get();
-  res.json({ symbols: rows, dreamers: dreamers.n });
+  const symbols = Object.entries(store.counts)
+    .map(([s, n]) => ({ s, n }))
+    .sort((a, b) => b.n - a.n)
+    .slice(0, 20);
+  const dreamers = new Set(store.dreams.map(d => d.uid)).size;
+  res.json({ symbols, dreamers });
 });
 
 // ── Data rights (UK/EU GDPR): export, delete one, delete all, delete account ──
-const lowerSymbol = db.prepare("UPDATE symbol_counts SET count = MAX(0, count - 1) WHERE symbol = ?");
-function decrementSymbolsFor(rows) {
-  rows.forEach(r => JSON.parse(r.symbols || "[]").forEach(s => lowerSymbol.run(String(s).toLowerCase())));
-}
-
-// Download everything we hold about you (data portability)
 app.get("/export", auth, (req, res) => {
-  const dreams = db.prepare("SELECT id, ts, dream, archetype, tradition, symbols, deep FROM dreams WHERE uid = ? ORDER BY ts DESC").all(req.uid);
-  res.json({ user: { uid: req.uid, username: req.username }, dreams: dreams.map(d => ({ ...d, symbols: JSON.parse(d.symbols || "[]") })) });
+  const dreams = store.dreams.filter(d => d.uid === req.uid).sort((a, b) => b.ts - a.ts);
+  res.json({ user: { uid: req.uid, username: req.username }, dreams });
 });
 
-// Delete a single dream
 app.delete("/dreams/:id", auth, (req, res) => {
-  const row = db.prepare("SELECT symbols FROM dreams WHERE id = ? AND uid = ?").get(req.params.id, req.uid);
-  if (!row) return res.status(404).json({ error: "not found" });
-  const tx = db.transaction(() => { decrementSymbolsFor([row]); db.prepare("DELETE FROM dreams WHERE id = ? AND uid = ?").run(req.params.id, req.uid); });
-  tx();
+  const i = store.dreams.findIndex(d => d.id === req.params.id && d.uid === req.uid);
+  if (i === -1) return res.status(404).json({ error: "not found" });
+  (store.dreams[i].symbols || []).forEach(lowerSymbol);
+  store.dreams.splice(i, 1);
+  save();
   res.json({ ok: true });
 });
 
-// Delete ALL of this user's dreams (keeps the account/login)
 app.delete("/dreams", auth, (req, res) => {
-  const rows = db.prepare("SELECT symbols FROM dreams WHERE uid = ?").all(req.uid);
-  const tx = db.transaction(() => { decrementSymbolsFor(rows); db.prepare("DELETE FROM dreams WHERE uid = ?").run(req.uid); });
-  tx();
-  res.json({ ok: true, deleted: rows.length });
+  const mine = store.dreams.filter(d => d.uid === req.uid);
+  mine.forEach(d => (d.symbols || []).forEach(lowerSymbol));
+  store.dreams = store.dreams.filter(d => d.uid !== req.uid);
+  save();
+  res.json({ ok: true, deleted: mine.length });
 });
 
-// Full erasure: dreams + payment records for this user
 app.delete("/account", auth, (req, res) => {
-  const rows = db.prepare("SELECT symbols FROM dreams WHERE uid = ?").all(req.uid);
-  const tx = db.transaction(() => {
-    decrementSymbolsFor(rows);
-    db.prepare("DELETE FROM dreams WHERE uid = ?").run(req.uid);
-    db.prepare("DELETE FROM payments WHERE uid = ?").run(req.uid);
-  });
-  tx();
+  const mine = store.dreams.filter(d => d.uid === req.uid);
+  mine.forEach(d => (d.symbols || []).forEach(lowerSymbol));
+  store.dreams = store.dreams.filter(d => d.uid !== req.uid);
+  for (const pid of Object.keys(store.payments)) if (store.payments[pid].uid === req.uid) delete store.payments[pid];
+  save();
   res.json({ ok: true });
 });
 
 // ── Pi payments: Approve -> (user signs on-chain) -> Complete ──
-// Docs: POST /v2/payments/{id}/approve and /complete, with header `Authorization: Key <PI_API_KEY>`.
 async function piPost(path) {
   const r = await fetch(`${PI_API}${path}`, { method: "POST", headers: { Authorization: "Key " + PI_API_KEY } });
   if (!r.ok) throw new Error(`Pi API ${path} failed: ${r.status}`);
@@ -187,8 +168,8 @@ app.post("/payments/approve", auth, async (req, res) => {
     const { paymentId, dreamId } = req.body || {};
     if (!paymentId) return res.status(400).json({ error: "paymentId required" });
     await piPost(`/payments/${paymentId}/approve`);
-    db.prepare("INSERT OR REPLACE INTO payments (payment_id, uid, dream_id, status, created) VALUES (?,?,?,?,?)")
-      .run(paymentId, req.uid, dreamId || null, "approved", Date.now());
+    store.payments[paymentId] = { payment_id: paymentId, uid: req.uid, dream_id: dreamId || null, status: "approved", created: Date.now() };
+    save();
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: String(e.message) });
@@ -205,18 +186,17 @@ app.post("/payments/complete", auth, async (req, res) => {
       body: JSON.stringify({ txid }),
     }).then(r => { if (!r.ok) throw new Error("complete failed: " + r.status); });
 
-    db.prepare("UPDATE payments SET status='completed', txid=? WHERE payment_id=?").run(txid, paymentId);
+    if (store.payments[paymentId]) { store.payments[paymentId].status = "completed"; store.payments[paymentId].txid = txid; }
 
-    // Payment confirmed -> generate the deep reading (AI if configured, else composed)
     const deep = await generateDeep(dream || "", archetype || "");
-    if (dreamId) db.prepare("UPDATE dreams SET deep=? WHERE id=? AND uid=?").run(deep, dreamId, req.uid);
+    if (dreamId) { const d = store.dreams.find(x => x.id === dreamId && x.uid === req.uid); if (d) d.deep = deep; }
+    save();
     res.json({ ok: true, deep });
   } catch (e) {
     res.status(500).json({ error: String(e.message) });
   }
 });
 
-// Handle any leftover unfinished payment (onIncompletePaymentFound)
 app.post("/payments/incomplete", auth, async (req, res) => {
   try {
     const { paymentId, txid } = req.body || {};
@@ -252,7 +232,6 @@ async function generateDeep(dream, archetype) {
       if (text) return text;
     } catch (_) { /* fall through to composed version */ }
   }
-  // Fallback if no AI key configured
   return `Your dream gathers around ${(archetype || "a single image").toLowerCase()}. Sit with the feeling it left, name the one thing it seems to be asking of you, and let the rest go for today.`;
 }
 
