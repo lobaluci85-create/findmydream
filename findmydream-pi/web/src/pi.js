@@ -5,7 +5,7 @@
 // Requires: the Pi SDK script + Pi.init in your host page (see index.html),
 // and BACKEND set to your deployed backend URL.
 
-const BACKEND = "https://YOUR-BACKEND-URL";   // <-- set after you deploy the backend
+const BACKEND = "https://findmydream.onrender.com";   // live Render backend
 const SANDBOX = true;                          // true while testing, false for Mainnet launch
 
 let _accessToken = null;   // current Pioneer's Pi access token
