@@ -222,9 +222,9 @@ async function generateDeep(dream, archetype) {
         headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
         body: JSON.stringify({
           model: "claude-sonnet-4-6",
-          max_tokens: 600,
-          system: "You are a warm, lucid dream guide. No promises, no medical advice. Reply with clean plain text, ~5 sentences.",
-          messages: [{ role: "user", content: `Dream: "${dream}". Dominant archetype: "${archetype}". Write one integrated deep reading: connect the symbols, name the inner tension, and end with one concrete reflection practice for today.` }],
+          max_tokens: 1500,
+          system: "You are a warm, lucid dream guide. No promises, no medical advice. Write a rich, in-depth reading in clean plain text (no markdown symbols, no headings in bold). Aim for roughly 500-650 words across 5 short sections, each separated by a blank line. Keep the tone personal, grounded, and reflective.",
+          messages: [{ role: "user", content: `Dream: "${dream}". Dominant archetype: "${archetype}". Write an integrated DEEP reading with these five parts, each as its own paragraph separated by a blank line:\n\n1) The big picture — what the dream as a whole seems to be circling around.\n2) Key symbols — take the 2-3 most striking images and unpack what each may be carrying.\n3) Across traditions — briefly read the dream through two lenses (for example Islamic Ta'bir and a Jungian/archetypal view), noting where they agree or differ.\n4) The personal mirror — connect the symbols to an inner tension the dreamer may be living right now, gently and without certainty.\n5) For today — close with one concrete reflection practice, then three short questions the dreamer can sit with.\n\nDo not use numbered headings in the output; let each paragraph flow naturally. No promises, no predictions, no medical advice.` }],
         }),
       });
       const data = await r.json();
@@ -234,5 +234,4 @@ async function generateDeep(dream, archetype) {
   }
   return `Your dream gathers around ${(archetype || "a single image").toLowerCase()}. Sit with the feeling it left, name the one thing it seems to be asking of you, and let the rest go for today.`;
 }
-
 app.listen(PORT, () => console.log(`FindMyDream backend listening on :${PORT}`));
