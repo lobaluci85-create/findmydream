@@ -631,22 +631,20 @@ export default function FindMyDream(){
 
   function deepReading(){
     if(deepLoading || !result) return;
-    if(user){
-      setDeepLoading(true);
-      payForDeepReading({
-        amount: 1,
-        dream: dream.trim(),
-        archetype: result.archetype,
-        onUnlock: (t) => { setDeep(t || deepLocal(result)); setDeepLoading(false); },
-        onCancel: () => setDeepLoading(false),
-        onError: () => { setDeep(deepLocal(result)); setDeepLoading(false); },
-      });
-    } else {
-      setDeepLoading(true);
-      setTimeout(() => { setDeep(deepLocal(result)); setDeepLoading(false); }, 450);
+    if(!user){
+      alert("Sign in with Pi to unlock the deep reading.");
+      return;
     }
+    setDeepLoading(true);
+    payForDeepReading({
+      amount: 1,
+      dream: dream.trim(),
+      archetype: result.archetype,
+      onUnlock: (t) => { if(t){ setDeep(t); } setDeepLoading(false); },
+      onCancel: () => { setDeepLoading(false); },
+      onError: () => { setDeepLoading(false); },
+    });
   }
-
   const maxN = useMemo(() => Math.max(...collective.map(c => c.n)), [collective]);
   const top = collective[0];
 
